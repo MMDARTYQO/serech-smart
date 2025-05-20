@@ -33,7 +33,7 @@ def install_required_libraries():
 # קורא לפונקציה לפני טעינת שאר הקוד
 if __name__ == "__main__":
     install_required_libraries()
-'''
+'''  
 import flet as ft
 from flet import *
 import os
@@ -66,13 +66,7 @@ import logging
 from optimized_index import OptimizedFileIndex
 from optimized_index import OptimizedFileIndex, LRUCache
 
-'''
-עדכון תצוגת הספרים באינקס חדשש
-מירת בחירת הגדרת התאמה מדויקת
-סימון התוצאה בסספרים
-ספריה מתקדמת לחילוץ PDF
-טיפול טוב יותר בוורד
-'''
+
 # פונקציית עזר – נתיב אחסון לאפליקציה
 def get_app_data_path():
     if platform.system() == 'Windows':
@@ -908,7 +902,7 @@ class DocumentSearchApp:
         ], spacing=0, alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
         main_column = ft.Column([
-            ft.Text("חיפוש בספרייה", size=30, weight="bold"),
+            ft.Text("חיפוש במסמכים", size=30, weight="bold"),
             top_row,
             self.results_container,
         ])
@@ -2203,7 +2197,7 @@ class DocumentSearchApp:
         # תצוגה ראשית
         main_view = ft.Container(
             content=ft.Column([
-                ft.Text("תצוגת ספרים", size=30, weight="bold"),
+                ft.Text("חיפוש בספרים", size=30, weight="bold"),
                 ft.Divider(height=3),
                 ft.Row([
                     books_list_container,
