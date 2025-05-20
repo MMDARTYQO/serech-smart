@@ -1,4 +1,5 @@
-'''
+
+
 import subprocess
 import sys
 
@@ -33,7 +34,8 @@ def install_required_libraries():
 # קורא לפונקציה לפני טעינת שאר הקוד
 if __name__ == "__main__":
     install_required_libraries()
-'''
+
+
 import flet as ft
 from flet import *
 import os
@@ -422,7 +424,7 @@ class FileIndex:
             except Exception as e:
                 logging.error(f"Error processing file {file_path}: {e}")
 
-    def search(self, query, search_options=None, max_results=50):
+    def search(self, query, search_options=None, max_results=1000):
         """חיפוש עם תאימות לממשק הקיים"""
         # בדיקת מטמון
         cache_key = f"{query}_{str(search_options.__dict__ if search_options else {})}_{max_results}"
@@ -493,14 +495,16 @@ class DocumentSearchApp:
         self.index_list = []
         self.book_search_term = None
         self.book_search_matches = []
+        self.current_search_results = []
         self.book_search_current = 0
         self.selected_file_types = self.app_settings.settings.get('file_types', [".pdf", ".docx", ".txt"])
         self.word_distance = self.app_settings.settings.get('word_distance', 0)
         self.search_options.file_types = self.selected_file_types
         self.search_options.word_distance = self.word_distance
         self.filter_row = self.create_file_type_buttons_row()
-
-
+        self.last_results_scroll_key = None
+        self.pinned_result_key = None
+        
         self.apply_theme_settings()
         self.init_components()
         self.setup_ui()
@@ -1248,6 +1252,14 @@ class DocumentSearchApp:
     def navigation_change(self, e):
         selected_index = e.control.selected_index
 
+        # שמירת מיקום גלילה – עדיף לנעוץ אם יש
+        if self.pinned_result_key:
+            self.last_results_scroll_key = self.pinned_result_key
+        elif self.results_list.controls:
+            self.last_results_scroll_key = self.results_list.controls[0].key
+        else:
+            self.last_results_scroll_key = None
+
         self.search_view.visible = selected_index == 0
         self.books_view.visible = selected_index == 1
         self.settings_view.visible = selected_index == 2
@@ -1259,7 +1271,6 @@ class DocumentSearchApp:
             for idx in self.app_settings.get_selected_indexes():
                 try:
                     file_index = FileIndex(idx)
-                    # שימוש ב-get_files במקום גישה ישירה ל-index
                     files = file_index.get_files()
                     for file_path, file_data in files.items():
                         if file_path.lower().endswith('.pdf'):
@@ -1276,8 +1287,14 @@ class DocumentSearchApp:
                 else:
                     self.select_book(books[0][0])
 
-        self.page.update()
-    
+        # גלילה לנעץ בכל מעבר לדף החיפוש
+        if selected_index == 0 and self.pinned_result_key:
+            from threading import Timer
+            Timer(0.9, lambda: self.results_list.scroll_to(key=self.pinned_result_key, duration=200)).start()
+
+        self.page.update()                
+
+        
     def update_search_options(self, e):
         """עדכון אפשרויות החיפוש"""
         controls = self.search_controls.controls
@@ -1373,6 +1390,12 @@ class DocumentSearchApp:
         self.page.update()
 
         all_results = []  # ←←← אתחול בכל מקרה
+        self.current_search_results = all_results  # ← זה הקריטי!
+        self.results_list.controls = [
+            self.create_result_container(result, idx)
+            for idx, result in enumerate(all_results)
+        ]
+        self.results_list.update()
 
         try:
             selected_indexes = self.app_settings.get_selected_indexes()
@@ -1460,10 +1483,16 @@ class DocumentSearchApp:
                 all_results = filtered_results
 
             self.results_list.controls = [
-                self.create_result_container(result)
-                for result in all_results
+                self.create_result_container(result, idx)
+                for idx, result in enumerate(all_results)
             ]
-            
+
+            # גלול אוטומטית למיקום הנעוץ (אם יש)
+            if self.pinned_result_key:
+                def restore_pinned():
+                    self.results_list.scroll_to(key=self.pinned_result_key, duration=300)
+                Timer(0.15, restore_pinned).start()
+    
             results_count = len(all_results)
             if results_count == 0:
                 self.show_status(f"לא נמצאו תוצאות עבור '{self.search_term.value}'")
@@ -1594,7 +1623,7 @@ class DocumentSearchApp:
 
 
 
-    def create_result_container(self, result):
+    def create_result_container(self, result, idx):
         file_path = result['file_path']
         location = result.get('location', '')
         context = result['context']
@@ -1604,6 +1633,8 @@ class DocumentSearchApp:
         pointer = 0
         text_lower = context.lower()
         search_term = self.search_term.value.strip()
+        is_pinned = self.pinned_result_key == f"result_{idx}"
+
 
         if exact_match:
             # הדגשה רק של מופע מדויק כמילה שלמה
@@ -1652,7 +1683,14 @@ class DocumentSearchApp:
             if pointer < len(context):
                 spans.append(ft.TextSpan(text=context[pointer:]))
 
-
+        # אייקון "נעץ"
+        pin_icon = ft.IconButton(
+            icon=ft.Icons.PUSH_PIN,
+            icon_size=20,
+            tooltip="נעץ מיקום זה",
+            icon_color=ft.Colors.RED if is_pinned else ft.Colors.GREY_500,
+            on_click=lambda e, idx=idx: self.set_pinned_result(idx)
+        )
 
 
         # אייקון עין לפתיחה מהירה
@@ -1666,6 +1704,7 @@ class DocumentSearchApp:
         )
 
         return ft.Container(
+            key=f"result_{idx}",
             content=ft.Column([
                 ft.Row([
                     ft.Icon(ft.Icons.DESCRIPTION, color=ft.Colors.BLUE),
@@ -1675,6 +1714,7 @@ class DocumentSearchApp:
                         weight=ft.FontWeight.BOLD,
                         expand=True
                     ),
+                    pin_icon,
                     preview_icon,
                 ]),
                 ft.Container(
@@ -1695,7 +1735,33 @@ class DocumentSearchApp:
             border=ft.border.all(1, ft.Colors.BLUE_GREY_200),
             expand=True
         )
+    
+    def set_pinned_result(self, idx):
+        key = f"result_{idx}"
+        if self.pinned_result_key == key:
+            self.pinned_result_key = None
+        else:
+            self.pinned_result_key = key
 
+        # בנה מחדש את הרשימה
+        self.results_list.controls = [
+            self.create_result_container(result, i)
+            for i, result in enumerate(self.current_search_results)
+        ]
+        self.results_list.update()
+
+        # הדפסה לdebug:
+        print("כל ה-keys ברשימה:",
+              [c.key for c in self.results_list.controls])
+        print("גלילה אל:", self.pinned_result_key)
+
+        # גלילה אוטומטית
+        if self.pinned_result_key:
+            def restore_pinned():
+                print("מנסה לגלול אל:", self.pinned_result_key)
+                self.results_list.scroll_to(key=self.pinned_result_key, duration=200)
+            Timer(0.15, restore_pinned).start()
+    
     def update_progress(self, current, total):
         """עדכון התקדמות האינדוקס"""
         self.index_progress.content.controls[1].value = f"מאנדקס {current}/{total} קבצים..."
