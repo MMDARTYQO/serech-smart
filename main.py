@@ -5,7 +5,7 @@ import sys
 def install_required_libraries():
     # רשימת הספריות שצריך להתקין
     required_libraries = [
-        'flet==0.27.1',
+        'flet',
         'PyPDF2',
         'python-docx',
         'PyMuPDF',
@@ -33,7 +33,7 @@ def install_required_libraries():
 # קורא לפונקציה לפני טעינת שאר הקוד
 if __name__ == "__main__":
     install_required_libraries()
-'''  
+'''
 import flet as ft
 from flet import *
 import os
@@ -181,7 +181,7 @@ class AppSettings:
             'font_size': 'normal',
             'indexes': [],
             'selected_indexes': [],
-            'default_context_words': 12,
+            'default_context_words': 200,
             'window_maximized': True
         }
         self.settings = self.load_settings()
@@ -491,7 +491,9 @@ class DocumentSearchApp:
         self.app_settings = AppSettings()
         self.force_book_path = None
         self.index_list = []
-
+        self.book_search_term = None
+        self.book_search_matches = []
+        self.book_search_current = 0
         self.selected_file_types = self.app_settings.settings.get('file_types', [".pdf", ".docx", ".txt"])
         self.word_distance = self.app_settings.settings.get('word_distance', 0)
         self.search_options.file_types = self.selected_file_types
@@ -902,7 +904,7 @@ class DocumentSearchApp:
         ], spacing=0, alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
         main_column = ft.Column([
-            ft.Text("חיפוש במסמכים", size=30, weight="bold"),
+            ft.Text("חיפוש בספרייה", size=30, weight="bold"),
             top_row,
             self.results_container,
         ])
@@ -1346,6 +1348,11 @@ class DocumentSearchApp:
         self.search_documents(None)  # חיפוש מיידי!
 
     def search_documents(self, e):
+        self.search_options.exact_match = self.app_settings.get_setting('exact_match', False)
+        self.search_options.match_all_words = True  # או לפי הגדרה אם יש
+        self.search_options.word_distance = self.app_settings.get_setting('word_distance', 0)
+        self.search_options.file_types = self.app_settings.get_setting('file_types', [".pdf", ".docx", ".txt"])
+        self.search_options.default_context_words = self.app_settings.get_setting('default_context_words', 12)
         search_term = self.search_term.value
         if search_term and search_term.strip():
             self.search_history.add(search_term)
@@ -1585,43 +1592,41 @@ class DocumentSearchApp:
             e.control.value = str(self.app_settings.get_setting('default_context_words', 12))
             e.control.update()
 
+
+
     def create_result_container(self, result):
         file_path = result['file_path']
         location = result.get('location', '')
-
-        # קביעת גודל הגופן לפי הגדרת המשתמש
-        font_size_map = {
-            "small": 13,
-            "normal": 16,
-            "large": 20
-        }
-        results_font_size = font_size_map.get(self.app_settings.get_setting('font_size', 'normal'), 16)
-        
-        # מספר מילים סביב ההתאמה מהגדרות
-        context_words = self.app_settings.get_setting('default_context_words', 12)
         context = result['context']
-        text_lower = context.lower()
-
-        # בניית spans עם הדגשת מילות החיפוש
+        results_font_size = 16  # או לפי הגדרות משתמש
+        exact_match = getattr(self.search_options, 'exact_match', False)
         spans = []
-        positions = []
-        
-        # בדיקה אם זה חיפוש מדויק
-        exact_match = self.search_options.exact_match if hasattr(self.search_options, 'exact_match') else False
-        
+        pointer = 0
+        text_lower = context.lower()
+        search_term = self.search_term.value.strip()
+
         if exact_match:
-            # חיפוש התאמה מדויקת בלבד
-            search_term = self.search_term.value.lower()
-            start = 0
-            while True:
-                pos = text_lower.find(search_term, start)
-                if pos == -1:
-                    break
-                positions.append((pos, pos + len(search_term)))
-                start = pos + len(search_term)
+            # הדגשה רק של מופע מדויק כמילה שלמה
+            pattern = r'\b' + re.escape(search_term) + r'\b'
+            for match in re.finditer(pattern, context, re.IGNORECASE):
+                start, end = match.span()
+                if start > pointer:
+                    spans.append(ft.TextSpan(text=context[pointer:start]))
+                spans.append(ft.TextSpan(
+                    text=context[start:end],
+                    style=ft.TextStyle(
+                        color=ft.Colors.RED,
+                        weight=ft.FontWeight.BOLD,
+                        size=results_font_size
+                    )
+                ))
+                pointer = end
+            if pointer < len(context):
+                spans.append(ft.TextSpan(text=context[pointer:]))
         else:
-            # חיפוש כל מילות החיפוש
-            search_words = self.search_term.value.lower().split()
+            # הדגשה של כל מופע של המחרוזת גם אם היא חלק ממילה
+            search_words = search_term.lower().split()
+            positions = []
             for word in search_words:
                 start = 0
                 while True:
@@ -1630,33 +1635,34 @@ class DocumentSearchApp:
                         break
                     positions.append((pos, pos + len(word)))
                     start = pos + len(word)
-        
-        # מיון המיקומים
-        positions.sort()
-        
-        # בניית ה-spans
-        pointer = 0
-        for start, end in positions:
-            if start > pointer:
-                spans.append(ft.TextSpan(text=context[pointer:start]))
-            spans.append(ft.TextSpan(
-                text=context[start:end],
-                style=ft.TextStyle(
-                    color=ft.Colors.RED,
-                    weight=ft.FontWeight.BOLD,
-                    size=results_font_size
-                )
-            ))
-            pointer = end
-        if pointer < len(context):
-            spans.append(ft.TextSpan(text=context[pointer:]))
+            positions.sort()
+            pointer = 0
+            for start, end in positions:
+                if start > pointer:
+                    spans.append(ft.TextSpan(text=context[pointer:start]))
+                spans.append(ft.TextSpan(
+                    text=context[start:end],
+                    style=ft.TextStyle(
+                        color=ft.Colors.RED,
+                        weight=ft.FontWeight.BOLD,
+                        size=results_font_size
+                    )
+                ))
+                pointer = end
+            if pointer < len(context):
+                spans.append(ft.TextSpan(text=context[pointer:]))
+
+
+
 
         # אייקון עין לפתיחה מהירה
         preview_icon = ft.IconButton(
             icon=ft.Icons.VISIBILITY,
             icon_size=24,
             tooltip="תצוגה מקדימה/פתח במיקום",
-            on_click=lambda e, file_path=file_path, location=location: self.open_book_at_search_result(file_path, location)
+            on_click=lambda e, file_path=file_path, location=location: self.open_book_at_search_result(
+                file_path, location, self.search_term.value
+            )
         )
 
         return ft.Container(
@@ -1744,6 +1750,7 @@ class DocumentSearchApp:
                 file_index.update_index(callback=self.update_progress)
                 self.index_progress.visible = False
                 self.show_status(f"האינדקס {idx['name']} עודכן בהצלחה")
+                self.refresh_all_views() 
         self.page.update()
 
 
@@ -1930,44 +1937,50 @@ class DocumentSearchApp:
 #------------------
 
                 
-    def open_book_at_search_result(self, file_path: str, location: str = ""):
-        print(f"DEBUG: open_book_at_search_result called with file_path={file_path} location={location}")
-        self.force_book_path = file_path  # כדי ש-navigation_change יידע מה לבחור
-
-        # מעבר לכרטיסייה של הספרים
+    def open_book_at_search_result(self, file_path: str, location: str = "", search_term: str = ""):
+        self.force_book_path = file_path
         self.navigation_bar.selected_index = 1
         self.navigation_bar.update()
 
-        # קריאה ידנית ל-navigation_change כדי להפעיל את הלוגיקה
         class DummyEvent:
             def __init__(self, control):
                 self.control = control
-
         self.navigation_change(DummyEvent(self.navigation_bar))
 
-        # טיפול במעבר לעמוד ספציפי
+        # קפיצה לעמוד
         try:
             if location:
-                location = location.replace("עמוד", "").strip()  # הסרת "עמוד" אם קיים
-                page_num = int(location) - 1  # הפחתה מ-1 כי אינדקס מתחיל מ-0
-                if 0 <= page_num < len(self.current_book_pages):  # בדיקה האם העמוד בטווח התקין
+                location = location.replace("עמוד", "").strip()
+                page_num = int(location) - 1
+                if 0 <= page_num < len(self.current_book_pages):
                     self.current_page_index = page_num
-                    print(f"DEBUG: Navigating to page {self.current_page_index + 1}")
                     self.update_book_page()
-                else:
-                    print(f"WARNING: page_num {page_num} is out of range for the current book.")
-            else:
-                print("DEBUG: No location provided.")
-        except ValueError as ex:
-            print(f"ERROR: Could not parse page number from location '{location}'. Exception: {ex}")
         except Exception as ex:
-            print(f"ERROR: Unexpected error when navigating to page. Exception: {ex}")
+            print(f"Error in open_book_at_search_result: {ex}")
 
-        self.page.update()                            
+        # הדבקת החיפוש לדף הספרים והפעלת הדגשה
+        if hasattr(self, "book_search_term"):
+            self.book_search_term.value = search_term
+            # אם יש פונקציה book_search_reset מנקה ומדגישה
+            if hasattr(self, "book_search_reset"):
+                self.book_search_reset()
+            elif hasattr(self, "update_book_page"):
+                self.update_book_page()
+
+        self.page.update()                           
 
     def create_books_view(self):
-        import flet as ft
-
+        self.book_font_size = 16  # קודם קובע את הגודל
+        self.book_page_text = ft.Text(
+            '',
+            selectable=True,
+            size=self.book_font_size,  # משתמש בגודל כאן
+            max_lines=None,
+            overflow=ft.TextOverflow.CLIP,
+            color=ft.Colors.BLACK,
+            text_align=ft.TextAlign.RIGHT,
+        )
+        # המשך הקוד כרגיל...
         # ודא אתחול משתנים קריטיים
         if not hasattr(self, "current_book_path"):
             self.current_book_path = None
@@ -1977,14 +1990,11 @@ class DocumentSearchApp:
             self.current_page_index = 0
 
         # --- איסוף כל הספרים מכל האינדקסים הנבחרים ---
-        # עדכון איסוף הספרים מכל האינדקסים הנבחרים
         self.books = []
         selected_indexes = self.app_settings.get_selected_indexes()
-        
         for idx_path in selected_indexes:
             try:
                 file_index = FileIndex(idx_path)
-                # שימוש במסד הנתונים החדש
                 with sqlite3.connect(file_index._optimized_index.db_path) as conn:
                     cursor = conn.execute("""
                         SELECT DISTINCT f.path, f.filename
@@ -1993,24 +2003,17 @@ class DocumentSearchApp:
                         WHERE f.path LIKE '%.pdf' OR f.path LIKE '%.docx' OR f.path LIKE '%.txt'
                         ORDER BY f.filename
                     """)
-                    
                     for row in cursor.fetchall():
                         file_path, filename = row
-                        if os.path.exists(file_path):  # וידוא שהקובץ עדיין קיים
-                            self.books.append((
-                                file_path,
-                                {'filename': filename}
-                            ))
-                            
+                        if os.path.exists(file_path):
+                            self.books.append((file_path, {'filename': filename}))
             except Exception as e:
                 print(f"Error loading index {idx_path}: {str(e)}")
                 import traceback
                 print(traceback.format_exc())
-                
-        # מיון הספרים לפי שם
+
         self.books.sort(key=lambda x: x[1]['filename'].lower())
 
-        # יצירת הרכיבים הראשיים
         self.book_title = ft.Text('', size=22, weight='bold', color=ft.Colors.PRIMARY)
         self.page_indicator = ft.Text(
             '',
@@ -2020,7 +2023,7 @@ class DocumentSearchApp:
             weight=ft.FontWeight.W_500
         )
         self.book_page_text = ft.Text(
-            '', 
+            '',
             selectable=True,
             size=16,
             max_lines=None,
@@ -2029,7 +2032,19 @@ class DocumentSearchApp:
             text_align=ft.TextAlign.RIGHT,
         )
 
-        # יצירת כפתורי ניווט
+        # ----------- חיפוש בתוך הספר -----------
+        self.book_search_term = ft.TextField(
+            hint_text="חפש בספר...",
+            width=200,
+            dense=True,
+            border_radius=7,
+            on_change=lambda e: self.book_search_reset(),
+            on_submit=lambda e: self.next_book_search_result(),
+        )
+        self.book_search_matches = []
+        self.book_search_current = 0
+
+        # ---------- כפתורי ניווט ----------
         self.prev_page_btn = ft.IconButton(
             icon=ft.Icons.ARROW_BACK,
             tooltip="עמוד קודם",
@@ -2039,7 +2054,6 @@ class DocumentSearchApp:
             disabled=True,
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12))
         )
-
         self.next_page_btn = ft.IconButton(
             icon=ft.Icons.ARROW_FORWARD,
             tooltip="עמוד הבא",
@@ -2050,7 +2064,7 @@ class DocumentSearchApp:
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12))
         )
 
-        # בניית רשימת ספרים
+        # בניית רשימת ספרים (כפי שיש אצלך)
         def build_books_buttons():
             controls = []
             if not self.books:
@@ -2097,7 +2111,6 @@ class DocumentSearchApp:
 
         self.build_books_buttons = build_books_buttons
 
-        # יצירת עמודת הספרים
         self.books_column = ft.Column(
             controls=build_books_buttons(),
             scroll=ft.ScrollMode.AUTO,
@@ -2106,7 +2119,6 @@ class DocumentSearchApp:
             expand=True,
         )
 
-        # מכל רשימת הספרים
         books_list_container = ft.Container(
             content=self.books_column,
             bgcolor=ft.Colors.SURFACE,
@@ -2124,24 +2136,54 @@ class DocumentSearchApp:
             margin=ft.margin.only(top=8, left=8, bottom=8, right=4)
         )
 
-
-        # פאנל תצוגת הספר
+        # -------------------- פאנל תצוגת הספר ---------------------
         left_panel = ft.Container(
             content=ft.Column([
-                # כותרת וניווט עליון
+                # שורה אחת: תיבת החיפוש, שם הספר, מונה עמודים
                 ft.Row([
-                    # כפתור עמוד קודם בצד ימין
-                    self.prev_page_btn,  # שימוש במשתנה המחלקה
-                    # כותרת הספר במרכז
-                    ft.Column([
-                        self.book_title,
-                        self.page_indicator,
-                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=5),
-                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                
+                    # קצה ימין: כפתורי נקה וחץ + תיבת חיפוש
+                    ft.Row([
+                        self.book_search_term,
+                        ft.IconButton(icon=ft.Icons.ARROW_DOWNWARD, tooltip="מעבר לתוצאה הבאה", on_click=lambda e: self.next_book_search_result()),
+                        ft.IconButton(icon=ft.Icons.CLEAR, tooltip="נקה חיפוש", on_click=lambda e: self.clear_book_search()),
+                    ], spacing=6),
+
+                    # רווח גמיש
+                    ft.Container(expand=True),
+
+                    # מונה עמוד במרכז (או איפה שתרצה)
+                    self.page_indicator,
+
+                    # רווח גמיש
+                    ft.Container(expand=True),
+
+                    # שם הספר בצד שמאל
+                    self.book_title,
+                ], 
+                    alignment=ft.MainAxisAlignment.CENTER, 
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER, 
+                    spacing=12
+                ),
+
+                # כפתורי ניווט עמודים (למטה או היכן שרצית)
+                ft.Row([
+                    self.prev_page_btn,
+                    self.next_page_btn,
+                    ft.Container(expand=True),  # רווח גמיש
+                    ft.IconButton(
+                        icon=ft.Icons.ADD, 
+                        tooltip="הגדל טקסט", 
+                        on_click=lambda e: self.increase_book_font_size()
+                    ),
+                    ft.IconButton(
+                        icon=ft.Icons.REMOVE, 
+                        tooltip="הקטן טקסט", 
+                        on_click=lambda e: self.decrease_book_font_size()
+                    ),
+                ], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+
                 ft.Divider(height=1),
-                
-                # רכיב גלילה עם ListView
+
                 ft.ListView(
                     controls=[
                         ft.Container(
@@ -2157,19 +2199,12 @@ class DocumentSearchApp:
                             ),
                         )
                     ],
-                    expand=True,  # גורם ל-ListView לתפוס את כל השטח הזמין
+                    expand=True,
                     spacing=10
                 ),
-                
-                # כפתור עמוד הבא
-                ft.Container(
-                    content=self.next_page_btn,  # שימוש במשתנה המחלקה
-                    padding=10,
-                    alignment=ft.alignment.bottom_left,
-                ),
-            ], 
-            expand=True, 
-            alignment=ft.MainAxisAlignment.START, 
+            ],
+            expand=True,
+            alignment=ft.MainAxisAlignment.START,
             spacing=11),
             expand=True,
             padding=ft.padding.all(10),
@@ -2184,7 +2219,7 @@ class DocumentSearchApp:
             margin=ft.margin.only(top=8, right=8, bottom=8, left=4)
         )
 
-        # מפריד אנכי
+
         vertical_divider = ft.Container(
             content=ft.VerticalDivider(
                 width=1,
@@ -2194,14 +2229,13 @@ class DocumentSearchApp:
             margin=ft.margin.symmetric(vertical=12)
         )
 
-        # תצוגה ראשית
         main_view = ft.Container(
             content=ft.Column([
                 ft.Text("חיפוש בספרים", size=30, weight="bold"),
                 ft.Divider(height=3),
                 ft.Row([
                     books_list_container,
-                    vertical_divider,
+                    vertical_divider,  # כאן הוא בשימוש
                     left_panel
                 ], expand=True, spacing=0, alignment=ft.MainAxisAlignment.START)
             ], expand=True, spacing=5),
@@ -2210,22 +2244,82 @@ class DocumentSearchApp:
             expand=True
         )
 
-        def update_nav_buttons():
-            self.prev_page_btn.disabled = (self.current_page_index == 0)
-            self.next_page_btn.disabled = (
-                not self.current_book_pages or self.current_page_index >= len(self.current_book_pages) - 1
-            )
-            self.prev_page_btn.update()
-            self.next_page_btn.update()
+        # --------------- פונקציות עזר ---------------
 
-        self.update_nav_buttons = update_nav_buttons
+        def book_search_reset():
+            term = self.book_search_term.value.strip()
+            self.book_search_matches = []
+            self.book_search_current = 0
+            if not term or not self.current_book_pages:
+                self.update_book_page()
+                return
+            # מציאת כל המופעים בכל הדפים
+            matches = []
+            term_lc = term.lower()
+            for page_idx, page_text in enumerate(self.current_book_pages):
+                for m in re.finditer(re.escape(term_lc), page_text.lower()):
+                    matches.append((page_idx, m.start(), m.end()))
+            self.book_search_matches = matches
+            self.book_search_current = 0
+            self.update_book_page()
+
+        self.book_search_reset = book_search_reset
+
+        def next_book_search_result():
+            if not self.book_search_matches:
+                return
+            self.book_search_current = (self.book_search_current + 1) % len(self.book_search_matches)
+            # עבור למופע הבא
+            page_idx, _, _ = self.book_search_matches[self.book_search_current]
+            self.current_page_index = page_idx
+            self.update_book_page()
+
+        self.next_book_search_result = next_book_search_result
+
+        def clear_book_search():
+            self.book_search_term.value = ""
+            self.book_search_matches = []
+            self.book_search_current = 0
+            self.update_book_page()
+
+        self.clear_book_search = clear_book_search
 
         def update_book_page():
             if not self.current_book_pages:
                 self.book_page_text.value = ""
+                self.book_page_text.spans = None
                 self.page_indicator.value = ""
             else:
-                self.book_page_text.value = self.current_book_pages[self.current_page_index]
+                page_text = self.current_book_pages[self.current_page_index]
+                term = self.book_search_term.value.strip()
+                if term:
+                    # הדגשת כל המופעים של החיפוש
+                    spans = []
+                    text_lower = page_text.lower()
+                    term_lower = term.lower()
+                    last = 0
+                    for m in re.finditer(re.escape(term_lower), text_lower):
+                        start, end = m.start(), m.end()
+                        if start > last:
+                            spans.append(ft.TextSpan(page_text[last:start]))
+                        # קבע צבע: מופע נוכחי (אדום כהה), אחרים (אדום בהיר)
+                        is_current = False
+                        count = 0
+                        for idx, s, e in self.book_search_matches:
+                            if idx == self.current_page_index and s == start and e == end:
+                                if count == self.book_search_current:
+                                    is_current = True
+                                count += 1
+                        color = ft.Colors.RED if is_current else "#d32f2f"
+                        spans.append(ft.TextSpan(page_text[start:end], style=ft.TextStyle(bgcolor="#ffcccc", color=color, weight=ft.FontWeight.BOLD)))
+                        last = end
+                    if last < len(page_text):
+                        spans.append(ft.TextSpan(page_text[last:]))
+                    self.book_page_text.value = None
+                    self.book_page_text.spans = spans
+                else:
+                    self.book_page_text.value = page_text
+                    self.book_page_text.spans = None
                 self.page_indicator.value = f"עמוד {self.current_page_index + 1} מתוך {len(self.current_book_pages)}"
             self.book_page_text.update()
             self.page_indicator.update()
@@ -2235,8 +2329,26 @@ class DocumentSearchApp:
 
         return main_view
 
+    def next_page(self, e=None):
+        if self.current_book_pages and self.current_page_index < len(self.current_book_pages) - 1:
+            self.current_page_index += 1
+            self.update_book_page()
+
+    def prev_page(self, e=None):
+        if self.current_book_pages and self.current_page_index > 0:
+            self.current_page_index -= 1
+            self.update_book_page()    
+
+    def update_nav_buttons(self):
+        self.prev_page_btn.disabled = (self.current_page_index == 0)
+        self.next_page_btn.disabled = (
+            not self.current_book_pages or self.current_page_index >= len(self.current_book_pages) - 1
+        )
+        self.prev_page_btn.update()
+        self.next_page_btn.update()
+
     def get_icon_for_file(self, file_path):
-        """מחזיר אייקון מתאים לסוג הקובץ"""
+        import flet as ft
         Icons_MAP = {
             ".pdf": ft.Icons.PICTURE_AS_PDF,
             ".txt": ft.Icons.DESCRIPTION,
@@ -2245,30 +2357,14 @@ class DocumentSearchApp:
         }
         ext = os.path.splitext(file_path.lower())[1]
         return Icons_MAP.get(ext, ft.Icons.INSERT_DRIVE_FILE)
-    
-
-    def prev_page(self, e=None):
-        if self.current_book_pages and self.current_page_index > 0:
-            self.current_page_index -= 1
-            self.update_book_page()
-
-    def next_page(self, e=None):
-        if self.current_book_pages and self.current_page_index < len(self.current_book_pages) - 1:
-            self.current_page_index += 1
-            self.update_book_page()
-
 
     def select_book(self, file_path):
-        """בחירת ספר לתצוגה"""
         file_data = None
-        
         try:
             for idx in self.app_settings.get_selected_indexes():
                 file_index = FileIndex(idx)
-                # שימוש במתודה get_files במקום גישה ישירה ל-index
                 files = file_index.get_files()
                 if file_path in files:
-                    # קבלת תוכן הקובץ מבסיס הנתונים
                     with sqlite3.connect(file_index._optimized_index.db_path) as conn:
                         cursor = conn.execute("""
                             SELECT c.content
@@ -2308,7 +2404,22 @@ class DocumentSearchApp:
             print(traceback.format_exc())
 
 
-        
+
+    def increase_book_font_size(self):
+        if not hasattr(self, "book_font_size"):
+            self.book_font_size = 16
+        self.book_font_size = min(self.book_font_size + 2, 48)
+        self.book_page_text.size = self.book_font_size
+        self.book_page_text.update()
+
+    def decrease_book_font_size(self):
+        if not hasattr(self, "book_font_size"):
+            self.book_font_size = 16
+        self.book_font_size = max(self.book_font_size - 2, 8)
+        self.book_page_text.size = self.book_font_size
+        self.book_page_text.update()            
+
+            
 #-----פונקצייה ראשית------        
 def main(page: ft.Page):
     app_settings = AppSettings()
