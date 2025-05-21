@@ -49,6 +49,188 @@ def tokenize(text: str) -> list:
     
     return words
 
+import re
+
+def parse_query(query: str):
+    # Regex: /.../
+    regex_match = re.match(r'^/(.+)/$', query)
+    if regex_match:
+        return {'type': 'regex', 'pattern': regex_match.group(1)}
+
+    # Proximity: "..."~N
+    proximity_match = re.match(r'^"(.+)"~(\d+)$', query)
+    if proximity_match:
+        return {'type': 'proximity', 'phrase': proximity_match.group(1), 'distance': int(proximity_match.group(2))}
+
+    # Exact match: "..."
+    if query.startswith('"') and query.endswith('"'):
+        return {'type': 'exact', 'phrase': query[1:-1]}
+
+    # OR
+    if ' OR ' in query:
+        parts = [part.strip() for part in query.split(' OR ')]
+        return {'type': 'or', 'parts': parts}
+
+    # Wildcard (*)
+    if '*' in query:
+        return {'type': 'wildcard', 'pattern': query.replace('*', '%')}
+
+    # Default
+    return {'type': 'normal', 'text': query}
+
+
+def search(self, query: str, search_options=None, max_results: int = 1000):
+    """
+    חיפוש מתקדם: OR, wildcard, proximity, regex, exact match, רגיל (AND)
+    """
+    try:
+        query_info = parse_query(query.strip())
+        results = []
+
+        with sqlite3.connect(self.db_path) as conn:
+            if query_info['type'] == 'regex':
+                # Regex: שליפה רחבה, סינון עם re בפייתון
+                sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path LIMIT ?"
+                rows = conn.execute(sql, (max_results * 10,)).fetchall()
+                pattern = re.compile(query_info['pattern'])
+                for row in rows:
+                    if pattern.search(row[3]):
+                        results.append({
+                            "filename": row[0],
+                            "file_path": row[1],
+                            "location": row[2],
+                            "context": self._optimize_context(row[3], [query], search_options.default_context_words if search_options else 200),
+                            "relevance_score": row[4]
+                        })
+                        if len(results) >= max_results:
+                            break
+
+            elif query_info['type'] == 'proximity':
+                # Proximity: שלוף עם LIKE, סנן לפי קרבה בפייתון
+                phrase_words = query_info['phrase'].split()
+                where_clauses = []
+                params = []
+                for w in phrase_words:
+                    if w:
+                        where_clauses.append("LOWER(c.content) LIKE ?")
+                        params.append(f'%{w.lower()}%')
+                params.append(max_results * 10)
+                if where_clauses:
+                    sql = f"SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path WHERE {' AND '.join(where_clauses)} LIMIT ?"
+                else:
+                    sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path LIMIT ?"
+                rows = conn.execute(sql, params).fetchall()
+                for row in rows:
+                    words = row[3].lower().split()
+                    positions = []
+                    for w in phrase_words:
+                        idxs = [i for i, word in enumerate(words) if word == w]
+                        if not idxs:
+                            break
+                        positions.append(idxs)
+                    else:
+                        from itertools import product
+                        found = False
+                        for comb in product(*positions):
+                            if max(comb) - min(comb) <= query_info['distance']:
+                                found = True
+                                break
+                        if found:
+                            results.append({
+                                "filename": row[0],
+                                "file_path": row[1],
+                                "location": row[2],
+                                "context": self._optimize_context(row[3], phrase_words, search_options.default_context_words if search_options else 200),
+                                "relevance_score": row[4]
+                            })
+                            if len(results) >= max_results:
+                                break
+
+            elif query_info['type'] == 'exact':
+                # Exact match: "..."
+                phrase = query_info['phrase'].lower()
+                sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path WHERE LOWER(c.content) LIKE ? LIMIT ?"
+                rows = conn.execute(sql, (f'%{phrase}%', max_results)).fetchall()
+                for row in rows:
+                    if phrase in row[3].lower():
+                        results.append({
+                            "filename": row[0],
+                            "file_path": row[1],
+                            "location": row[2],
+                            "context": self._optimize_context(row[3], [phrase], search_options.default_context_words if search_options else 200),
+                            "relevance_score": row[4]
+                        })
+
+            elif query_info['type'] == 'or':
+                # OR
+                or_clauses = []
+                params = []
+                for part in query_info['parts']:
+                    if part:
+                        or_clauses.append("LOWER(c.content) LIKE ?")
+                        params.append(f"%{part.lower()}%")
+                params.append(max_results)
+                if or_clauses:
+                    sql = f"SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path WHERE {' OR '.join(or_clauses)} LIMIT ?"
+                else:
+                    sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path LIMIT ?"
+                rows = conn.execute(sql, params).fetchall()
+                for row in rows:
+                    results.append({
+                        "filename": row[0],
+                        "file_path": row[1],
+                        "location": row[2],
+                        "context": self._optimize_context(row[3], query_info['parts'], search_options.default_context_words if search_options else 200),
+                        "relevance_score": row[4]
+                    })
+
+            elif query_info['type'] == 'wildcard':
+                # Wildcard: *
+                pattern = query_info['pattern'].lower()
+                params = [pattern, max_results]
+                if pattern.replace('%', ''):
+                    sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path WHERE LOWER(c.content) LIKE ? LIMIT ?"
+                else:
+                    sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path LIMIT ?"
+                rows = conn.execute(sql, params).fetchall()
+                for row in rows:
+                    results.append({
+                        "filename": row[0],
+                        "file_path": row[1],
+                        "location": row[2],
+                        "context": self._optimize_context(row[3], [pattern.replace('%', '')], search_options.default_context_words if search_options else 200),
+                        "relevance_score": row[4]
+                    })
+
+            else:  # normal - כל מילה חובה (AND)
+                words = tokenize(query_info['text'].lower())
+                and_clauses = []
+                params = []
+                for w in words:
+                    if w:
+                        and_clauses.append("LOWER(c.content) LIKE ?")
+                        params.append(f'%{w}%')
+                params.append(max_results)
+                if and_clauses:
+                    sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path WHERE " + " AND ".join(and_clauses) + " LIMIT ?"
+                else:
+                    sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path LIMIT ?"
+                rows = conn.execute(sql, params).fetchall()
+                for row in rows:
+                    results.append({
+                        "filename": row[0],
+                        "file_path": row[1],
+                        "location": row[2],
+                        "context": self._optimize_context(row[3], words, search_options.default_context_words if search_options else 200),
+                        "relevance_score": row[4]
+                    })
+
+        return results
+
+    except Exception as e:
+        logging.error(f"Search error: {e}")
+        return []
+
 # הוספת הגדרת SearchOptions
 class SearchOptions:
     def __init__(self):
@@ -67,6 +249,7 @@ class SearchOptions:
 #------------------------
 #  שיפור האינדקס
 #-------------------------
+
 
 @dataclass
 class IndexStats:
@@ -354,98 +537,163 @@ class OptimizedFileIndex:
                     INSERT INTO word_locations (word, content_id, position)
                     VALUES (?, ?, ?)
                 """, (word, content_id, position))
-                
-  
-    def search(self, query: str, search_options: Optional[SearchOptions] = None, 
-              max_results: int = 50) -> List[Dict]:
-        """חיפוש עם אופטימיזצית זיכרון"""
+
+
+
+
+
+    def search(self, query: str, search_options=None, max_results: int = 1000):
+        """
+        חיפוש מתקדם: OR, wildcard, proximity, regex, exact match, רגיל (AND)
+        """
         try:
-            query_words = tokenize(query.strip().lower())
-            if not query_words:
-                return []
+            query_info = parse_query(query.strip())
+            results = []
 
             with sqlite3.connect(self.db_path) as conn:
-                params = []
-                
-                if search_options and search_options.exact_match:
-                    # חיפוש התאמה מדויקת
-                    exact_phrase = ' '.join(query_words)
-                    sql = """
-                        SELECT DISTINCT 
-                            f.filename,
-                            f.path as file_path,
-                            c.location,
-                            c.content,
-                            1 as word_matches
-                        FROM content c
-                        JOIN files f ON c.file_path = f.path
-                        WHERE (
-                            LOWER(c.content) LIKE ? OR  -- בדיקה עם רווח בהתחלה
-                            LOWER(c.content) LIKE ? OR  -- בדיקה עם רווח בסוף
-                            LOWER(c.content) LIKE ? OR  -- בדיקה עם רווחים בשני הצדדים
-                            LOWER(c.content) = ?        -- בדיקה למקרה של התאמה מלאה
-                        )
-                        GROUP BY c.id
-                        LIMIT ?
-                    """
-                    # מוסיפים את כל האפשרויות לחיפוש המדויק
-                    params = [
-                        f'% {exact_phrase}',     # רווח רק בהתחלה
-                        f'{exact_phrase} %',     # רווח רק בסוף
-                        f'% {exact_phrase} %',   # רווחים בשני הצדדים
-                        exact_phrase,            # התאמה מלאה
-                        max_results
-                    ]
-                else:
-                    # חיפוש רגיל - מילים בודדות
-                    query_parts = []
-                    for word in query_words:
-                        if search_options and search_options.match_all_words:
-                            # חייב להכיל את כל המילים
-                            query_parts.append("LOWER(c.content) LIKE ?")
-                            params.append(f'%{word}%')
+                if query_info['type'] == 'regex':
+                    # Regex: שליפה רחבה, סינון עם re בפייתון
+                    sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path LIMIT ?"
+                    rows = conn.execute(sql, (max_results * 10,)).fetchall()
+                    pattern = re.compile(query_info['pattern'])
+                    for row in rows:
+                        if pattern.search(row[3]):
+                            results.append({
+                                "filename": row[0],
+                                "file_path": row[1],
+                                "location": row[2],
+                                "context": self._optimize_context(row[3], [query], search_options.default_context_words if search_options else 200),
+                                "relevance_score": row[4]
+                            })
+                            if len(results) >= max_results:
+                                break
+
+                elif query_info['type'] == 'proximity':
+                    # Proximity: שלוף עם LIKE, סנן לפי קרבה בפייתון
+                    phrase_words = query_info['phrase'].split()
+                    where_clauses = []
+                    params = []
+                    for w in phrase_words:
+                        if w:
+                            where_clauses.append("LOWER(c.content) LIKE ?")
+                            params.append(f'%{w.lower()}%')
+                    params.append(max_results * 10)
+                    if where_clauses:
+                        sql = f"SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path WHERE {' AND '.join(where_clauses)} LIMIT ?"
+                    else:
+                        sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path LIMIT ?"
+                    rows = conn.execute(sql, params).fetchall()
+                    for row in rows:
+                        words = row[3].lower().split()
+                        positions = []
+                        for w in phrase_words:
+                            idxs = [i for i, word in enumerate(words) if word == w]
+                            if not idxs:
+                                break
+                            positions.append(idxs)
                         else:
-                            # מספיק שתכיל לפחות מילה אחת
-                            query_parts.append("LOWER(c.content) LIKE ?")
-                            params.append(f'%{word}%')
-                    
-                    sql = f"""
-                        SELECT DISTINCT 
-                            f.filename,
-                            f.path as file_path,
-                            c.location,
-                            c.content,
-                            1 as word_matches
-                        FROM content c
-                        JOIN files f ON c.file_path = f.path
-                        WHERE {" AND ".join(query_parts) if search_options and search_options.match_all_words 
-                              else " OR ".join(query_parts)}
-                        GROUP BY c.id
-                        LIMIT ?
-                    """
+                            from itertools import product
+                            found = False
+                            for comb in product(*positions):
+                                if max(comb) - min(comb) <= query_info['distance']:
+                                    found = True
+                                    break
+                            if found:
+                                results.append({
+                                    "filename": row[0],
+                                    "file_path": row[1],
+                                    "location": row[2],
+                                    "context": self._optimize_context(row[3], phrase_words, search_options.default_context_words if search_options else 200),
+                                    "relevance_score": row[4]
+                                })
+                                if len(results) >= max_results:
+                                    break
+
+                elif query_info['type'] == 'exact':
+                    # Exact match: "..."
+                    phrase = query_info['phrase'].lower()
+                    sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path WHERE LOWER(c.content) LIKE ? LIMIT ?"
+                    rows = conn.execute(sql, (f'%{phrase}%', max_results)).fetchall()
+                    for row in rows:
+                        if phrase in row[3].lower():
+                            results.append({
+                                "filename": row[0],
+                                "file_path": row[1],
+                                "location": row[2],
+                                "context": self._optimize_context(row[3], [phrase], search_options.default_context_words if search_options else 200),
+                                "relevance_score": row[4]
+                            })
+
+                elif query_info['type'] == 'or':
+                    # OR
+                    or_clauses = []
+                    params = []
+                    for part in query_info['parts']:
+                        if part:
+                            or_clauses.append("LOWER(c.content) LIKE ?")
+                            params.append(f"%{part.lower()}%")
                     params.append(max_results)
-                
-                results = []
-                for row in conn.execute(sql, params):
-                    result = {
-                        "filename": row[0],
-                        "file_path": row[1],
-                        "location": row[2],
-                        "context": self._optimize_context(
-                            row[3], 
-                            [' '.join(query_words)] if search_options and search_options.exact_match else query_words,
-                            search_options.default_context_words if search_options else 200
-                        ),
-                        "relevance_score": row[4]
-                    }
-                    results.append(result)
-                
-                return results
+                    if or_clauses:
+                        sql = f"SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path WHERE {' OR '.join(or_clauses)} LIMIT ?"
+                    else:
+                        sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path LIMIT ?"
+                    rows = conn.execute(sql, params).fetchall()
+                    for row in rows:
+                        results.append({
+                            "filename": row[0],
+                            "file_path": row[1],
+                            "location": row[2],
+                            "context": self._optimize_context(row[3], query_info['parts'], search_options.default_context_words if search_options else 200),
+                            "relevance_score": row[4]
+                        })
+
+                elif query_info['type'] == 'wildcard':
+                    # Wildcard: *
+                    pattern = query_info['pattern'].lower()
+                    params = [pattern, max_results]
+                    if pattern.replace('%', ''):
+                        sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path WHERE LOWER(c.content) LIKE ? LIMIT ?"
+                    else:
+                        sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path LIMIT ?"
+                    rows = conn.execute(sql, params).fetchall()
+                    for row in rows:
+                        results.append({
+                            "filename": row[0],
+                            "file_path": row[1],
+                            "location": row[2],
+                            "context": self._optimize_context(row[3], [pattern.replace('%', '')], search_options.default_context_words if search_options else 200),
+                            "relevance_score": row[4]
+                        })
+
+                else:  # normal - כל מילה חובה (AND)
+                    words = tokenize(query_info['text'].lower())
+                    and_clauses = []
+                    params = []
+                    for w in words:
+                        if w:
+                            and_clauses.append("LOWER(c.content) LIKE ?")
+                            params.append(f'%{w}%')
+                    params.append(max_results)
+                    if and_clauses:
+                        sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path WHERE " + " AND ".join(and_clauses) + " LIMIT ?"
+                    else:
+                        sql = "SELECT f.filename, f.path, c.location, c.content, 1 FROM content c JOIN files f ON c.file_path = f.path LIMIT ?"
+                    rows = conn.execute(sql, params).fetchall()
+                    for row in rows:
+                        results.append({
+                            "filename": row[0],
+                            "file_path": row[1],
+                            "location": row[2],
+                            "context": self._optimize_context(row[3], words, search_options.default_context_words if search_options else 200),
+                            "relevance_score": row[4]
+                        })
+
+            return results
 
         except Exception as e:
             logging.error(f"Search error: {e}")
             return []
-    
+                    
     def _optimize_context(self, text: str, query_words: List[str], context_words: int) -> str:
         """אופטימיזציה של טקסט ההקשר"""
         words = text.split()

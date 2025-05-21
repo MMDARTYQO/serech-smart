@@ -1,5 +1,5 @@
 
-
+'''
 import subprocess
 import sys
 
@@ -34,7 +34,7 @@ def install_required_libraries():
 # קורא לפונקציה לפני טעינת שאר הקוד
 if __name__ == "__main__":
     install_required_libraries()
-
+'''
 
 import flet as ft
 from flet import *
@@ -504,6 +504,7 @@ class DocumentSearchApp:
         self.filter_row = self.create_file_type_buttons_row()
         self.last_results_scroll_key = None
         self.pinned_result_key = None
+        self.advanced_info_dialog = None
         
         self.apply_theme_settings()
         self.init_components()
@@ -1288,11 +1289,10 @@ class DocumentSearchApp:
                     self.select_book(books[0][0])
 
         # גלילה לנעץ בכל מעבר לדף החיפוש
-        if selected_index == 0 and self.pinned_result_key:
-            from threading import Timer
-            Timer(0.9, lambda: self.results_list.scroll_to(key=self.pinned_result_key, duration=200)).start()
-
+        if selected_index == 0:
+            self.scroll_to_pinned_result()
         self.page.update()                
+                
 
         
     def update_search_options(self, e):
@@ -1364,6 +1364,14 @@ class DocumentSearchApp:
         self.history_popup.update()
         self.search_documents(None)  # חיפוש מיידי!
 
+
+    def scroll_to_pinned_result(self):
+        # בדוק שהנעץ קיים ברשימה
+        if self.pinned_result_key and self.pinned_result_key in [c.key for c in self.results_list.controls]:
+            from threading import Timer
+            # דיליי קצר כדי לוודא שהרינדור הסתיים
+            Timer(0.15, lambda: self.results_list.scroll_to(key=self.pinned_result_key, duration=300)).start()        
+
     def search_documents(self, e):
         self.search_options.exact_match = self.app_settings.get_setting('exact_match', False)
         self.search_options.match_all_words = True  # או לפי הגדרה אם יש
@@ -1396,6 +1404,10 @@ class DocumentSearchApp:
             for idx, result in enumerate(all_results)
         ]
         self.results_list.update()
+        self.current_search_results = all_results  # עדכן את המערך התומך
+
+        # גלול לנעץ אם יש
+        self.scroll_to_pinned_result()
 
         try:
             selected_indexes = self.app_settings.get_selected_indexes()
@@ -1622,7 +1634,6 @@ class DocumentSearchApp:
             e.control.update()
 
 
-
     def create_result_container(self, result, idx):
         file_path = result['file_path']
         location = result.get('location', '')
@@ -1683,13 +1694,11 @@ class DocumentSearchApp:
             if pointer < len(context):
                 spans.append(ft.TextSpan(text=context[pointer:]))
 
-        # אייקון "נעץ"
-        pin_icon = ft.IconButton(
-            icon=ft.Icons.PUSH_PIN,
-            icon_size=20,
-            tooltip="נעץ מיקום זה",
-            icon_color=ft.Colors.RED if is_pinned else ft.Colors.GREY_500,
-            on_click=lambda e, idx=idx: self.set_pinned_result(idx)
+        folder_icon = ft.IconButton(
+            icon=ft.Icons.FOLDER_OPEN,
+            icon_size=24,
+            tooltip="פתח קובץ בתוכנה ברירת מחדל",
+            on_click=lambda e, file_path=file_path: self.open_file_in_default_app(file_path)
         )
 
 
@@ -1707,6 +1716,7 @@ class DocumentSearchApp:
             key=f"result_{idx}",
             content=ft.Column([
                 ft.Row([
+                    ft.Text(str(idx+1), size=16, color=ft.Colors.GREY_600),  # ← מספר התוצאה
                     ft.Icon(ft.Icons.DESCRIPTION, color=ft.Colors.BLUE),
                     ft.Text(
                         f"{result['filename']} ({location})",
@@ -1714,7 +1724,7 @@ class DocumentSearchApp:
                         weight=ft.FontWeight.BOLD,
                         expand=True
                     ),
-                    pin_icon,
+                    folder_icon,
                     preview_icon,
                 ]),
                 ft.Container(
@@ -1735,7 +1745,7 @@ class DocumentSearchApp:
             border=ft.border.all(1, ft.Colors.BLUE_GREY_200),
             expand=True
         )
-    
+            
     def set_pinned_result(self, idx):
         key = f"result_{idx}"
         if self.pinned_result_key == key:
@@ -1761,6 +1771,7 @@ class DocumentSearchApp:
                 print("מנסה לגלול אל:", self.pinned_result_key)
                 self.results_list.scroll_to(key=self.pinned_result_key, duration=200)
             Timer(0.15, restore_pinned).start()
+            
     
     def update_progress(self, current, total):
         """עדכון התקדמות האינדוקס"""
@@ -1973,12 +1984,18 @@ class DocumentSearchApp:
             self.search_documents(None)    
 
     def build_advanced_settings_panel(self):
-        """בניית פאנל ההגדרות המתקדמות"""
         import flet as ft
-        self.filter_row = self.create_file_type_buttons_row() 
-        # בניית הפאנל המלא
+        self.filter_row = self.create_file_type_buttons_row()
+
+        # כפתור מידע
+        info_button = ft.IconButton(
+            icon=ft.Icons.INFO_OUTLINE,
+            tooltip="מידע על אפשרויות החיפוש",
+            on_click=self.show_advanced_info_dialog
+        )
+
         return ft.Column([
-            self.filter_row, 
+            ft.Row([self.filter_row, info_button], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ft.Switch(
                 label="חיפוש בשמות קבצים בלבד",
                 value=self.app_settings.get_setting('search_filenames_only', False),
@@ -1990,6 +2007,157 @@ class DocumentSearchApp:
                 on_change=lambda e: self.update_search_setting('exact_match', e.control.value)
             ),
         ], spacing=10)
+
+
+    def show_advanced_info_dialog(self, e):
+        import flet as ft
+
+        info_controls = [
+            ft.Text(
+                "אפשרויות חיפוש מתקדמות",
+                size=22,
+                weight="bold",
+                color=ft.Colors.BLUE_900,
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Divider(),
+            ft.Text(
+                "1. חיפוש OR",
+                size=16,
+                weight="bold",
+                color=ft.Colors.BLUE_800,
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Text(
+                "הצגת תוצאות המכילות לפחות אחת מהמילים.\nדוגמה: אור OR שקיעה",
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Divider(thickness=0.5, color=ft.Colors.BLUE_100),
+
+            ft.Text(
+                "2. תו כללי * (Wildcard)",
+                size=16,
+                weight="bold",
+                color=ft.Colors.BLUE_800,
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Text(
+                "חיפוש מלים המתחילות/מסתיימות בתבנית מסוימת.\nדוגמה: חישוב*",
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Divider(thickness=0.5, color=ft.Colors.BLUE_100),
+
+            ft.Text(
+                "3. קרבה בין מילים (Proximity)",
+                size=16,
+                weight="bold",
+                color=ft.Colors.BLUE_800,
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Text(
+                "חיפוש מילים שמופיעות קרוב זו לזו.\nדוגמה: \"גדול בית\"~3",
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Divider(thickness=0.5, color=ft.Colors.BLUE_100),
+
+            ft.Text(
+                "4. ביטוי רגולרי (Regex)",
+                size=16,
+                weight="bold",
+                color=ft.Colors.BLUE_800,
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Text(
+                "חיפוש עם תבנית מתקדמת.\nדוגמה: /[א-ת]{3,5}/",
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Divider(thickness=0.5, color=ft.Colors.BLUE_100),
+
+            ft.Text(
+                "5. התאמה מדויקת",
+                size=16,
+                weight="bold",
+                color=ft.Colors.BLUE_800,
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Text(
+                "חיפוש ביטוי מדויק כפי שהוא.\nדוגמה: \"תלמוד בבלי\"",
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Divider(thickness=0.5, color=ft.Colors.BLUE_100),
+
+            ft.Text(
+                "6. חיפוש רגיל (AND)",
+                size=16,
+                weight="bold",
+                color=ft.Colors.BLUE_800,
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Text(
+                "כל מילה חייבת להופיע בתוצאה.\nדוגמה: תורה חכמה",
+                text_align=ft.TextAlign.RIGHT,
+                rtl=True,
+            ),
+            ft.Divider(),
+
+        ]
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(
+                "הסבר על אפשרויות חיפוש מתקדמות",
+                text_align=ft.TextAlign.RIGHT,
+                color=ft.Colors.BLUE_900,
+                weight="bold",
+                rtl=True,
+            ),
+            content=ft.Container(
+                content=ft.Column(
+                    info_controls,
+                    tight=True,
+                    expand=True,
+                    alignment=ft.alignment.top_right,
+                    spacing=6,
+                    horizontal_alignment=ft.CrossAxisAlignment.END,  # זה מה שמיישר לימין
+                    scroll=ft.ScrollMode.ALWAYS,
+                ),
+                alignment=ft.alignment.center,
+                padding=ft.padding.all(15),
+                bgcolor=ft.Colors.BLUE_50,
+                border_radius=8,
+                expand=True,
+                height=500,  # קובע גובה קבוע
+
+                ),
+            actions=[
+                ft.TextButton(
+                    "סגור",
+                    on_click=lambda e: self.page.close(dlg),
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+                )
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            on_dismiss=lambda e: None,
+            alignment=ft.alignment.center,  # הדיאלוג נשאר במרכז
+        )
+        self.page.open(dlg)
+    
+    def close_advanced_info_dialog(self):
+        if self.advanced_info_dialog:
+            self.advanced_info_dialog.open = False
+            self.page.update()    
         
     def change_window_maximized(self, e):
         self.app_settings.settings['window_maximized'] = e.control.value
@@ -2483,7 +2651,19 @@ class DocumentSearchApp:
             self.book_font_size = 16
         self.book_font_size = max(self.book_font_size - 2, 8)
         self.book_page_text.size = self.book_font_size
-        self.book_page_text.update()            
+        self.book_page_text.update()
+
+
+    def open_file_in_default_app(self, file_path):
+        import platform
+        import subprocess
+        import os
+        if platform.system() == 'Windows':
+            os.startfile(file_path)
+        elif platform.system() == 'Darwin':
+            subprocess.call(['open', file_path])
+        else:
+            subprocess.call(['xdg-open', file_path])        
 
             
 #-----פונקצייה ראשית------        
